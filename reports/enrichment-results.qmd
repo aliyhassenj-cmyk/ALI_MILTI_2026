@@ -1,0 +1,221 @@
+---
+title: "Set-based enrichment — genes and species"
+subtitle: "Notebook 05 results, with every check that earned them"
+format: typst
+---
+
+# 1. The ranking
+
+Raw counts from week 18 (157 participants), genes with ≥ 10 reads in a quarter
+of samples. DESeq2 on `~ outcome`, contrast preterm vs term, ranked by the
+Wald statistic.
+
+```{r}
+#| label: ranking
+suppressPackageStartupMessages({library(tidyverse); library(here)})
+genes <- read_csv(here("data", "genes_by_outcome.csv"), show_col_types = FALSE)
+cat("genes tested:", sum(!is.na(genes$pvalue)),
+    "| significant (padj < 0.05):", sum(genes$padj < 0.05, na.rm = TRUE),
+    "| positive stat (preterm-high):", sum(genes$stat > 0, na.rm = TRUE))
+```
+
+The column order of the count matrix was checked against the metadata rows
+before the test (`stopifnot(identical(...))` — it passed).
+
+# 2. fgsea against Hallmark
+
+Ranking vector: `stat`, named by Ensembl ID. Hallmark sets from msigdbr with
+Ensembl IDs. `fgsea(minSize = 15, maxSize = 500)`.
+
+```{r}
+#| label: hallmark
+fg <- read_csv(here("data", "fgsea_hallmark_outcome.csv"), show_col_types = FALSE)
+cat("sets tested:", nrow(fg), "| significant:", sum(fg$padj < 0.05),
+    "| higher in preterm:", sum(fg$padj < 0.05 & fg$NES > 0),
+    "| higher in term:", sum(fg$padj < 0.05 & fg$NES < 0))
+fg |> arrange(padj) |> select(pathway, size, NES, padj) |> head(10) |>
+  mutate(across(where(is.numeric), \(x) signif(x, 3)))
+```
+
+# 3. Two views of the fgsea result
+
+```{r}
+#| label: nesbar
+#| fig-width: 8
+#| fig-height: 4.5
+fg |>
+  slice_max(abs(NES), n = 12) |>
+  mutate(pathway = str_to_sentence(str_replace_all(str_remove(pathway, "HALLMARK_"), "_", " ")),
+         direction = if_else(NES > 0, "higher in preterm", "higher in term")) |>
+  ggplot(aes(NES, reorder(pathway, abs(NES)), fill = direction)) +
+  geom_col() +
+  labs(x = "Normalised enrichment score (NES)", y = NULL, fill = NULL,
+       title = "Twelve strongest Hallmark sets") +
+  theme_minimal(base_size = 12)
+```
+
+```{r}
+#| label: runscore
+#| fig-width: 8
+#| fig-height: 4
+suppressPackageStartupMessages({library(msigdbr)})
+stat_vec <- genes$stat; names(stat_vec) <- genes$feature
+stat_vec <- sort(stat_vec[!is.na(stat_vec)], decreasing = TRUE)
+hh <- if (packageVersion("msigdbr") >= "10.0.0") {
+  msigdbr(species = "Homo sapiens", collection = "H")
+} else {
+  msigdbr(species = "Homo sapiens", category = "H")
+}
+tnfa <- hh |> distinct(gs_name, ensembl_gene) |>
+  filter(gs_name == "HALLMARK_TNFA_SIGNALING_VIA_NFKB") |> pull(ensembl_gene)
+fgsea::plotEnrichment(tnfa, stat_vec) +
+  labs(title = "Running score: HALLMARK_TNFA_SIGNALING_VIA_NFKB") +
+  theme_minimal(base_size = 12)
+```
+
+The running score climbs steeply at the left (the most preterm-positive
+statistics) and reaches its maximum deviation with 115 of 195 genes in the
+leading edge — the plot you would show if the identifiers had NOT matched
+would hug zero instead.
+
+# 4. Did the identifiers match?
+
+- All 13,738 ranking names are clean `ENSG00000000000` format — no symbols, no
+  version suffixes.
+- **3,854 of 13,738** genes appear in at least one Hallmark set (Hallmark has
+  only 4,391 genes total, so that is a high match rate, not a low one).
+- The match is real, not luck: gene symbols against Ensembl IDs would have
+  overlapped **zero** times; versioned IDs (`ENSG00000000000.1`) would also
+  have overlapped zero times.
+
+# 5. The top five sets, interpreted
+
+1. **TNFα signalling via NF-κB** (NES 3.47, preterm-high): leading edge is a
+   textbook NF-κB program — IL6, NFKB1, NFKBIA, TNFAIP3, ICAM1, CCL2.
+2. **Inflammatory response** (NES 3.36, preterm-high): the broad cytokine/
+   chemokine program — largely the same genes as #1.
+3. **Heme metabolism** (NES −2.84, term-high): shares almost no genes with the
+   others — a genuinely independent result; read cautiously (bulk tissue can
+   track cell-type mix).
+4. **Interferon gamma response** (NES 2.41, preterm-high): overlaps #2 partly,
+   not a duplicate.
+5. **Complement** (NES 2.38, preterm-high): independently plausible —
+   complement is known to be involved in parturition.
+
+## Shared genes between the top five sets
+
+```{r}
+#| label: shared
+suppressPackageStartupMessages({library(msigdbr)})
+h <- if (packageVersion("msigdbr") >= "10.0.0") {
+  msigdbr(species = "Homo sapiens", collection = "H")
+} else {
+  msigdbr(species = "Homo sapiens", category = "H")
+}
+sets <- h |> distinct(gs_name, ensembl_gene) |> with(split(ensembl_gene, gs_name))
+top5 <- fg |> arrange(padj) |> slice_head(n = 5) |> pull(pathway)
+pr <- utils::combn(top5, 2)
+map_dfr(1:ncol(pr), function(i) {
+  a <- pr[1, i]; b <- pr[2, i]
+  s <- length(intersect(sets[[a]], sets[[b]]))
+  tibble(pair = paste(str_remove(a, "HALLMARK_"), "~", str_remove(b, "HALLMARK_")),
+         shared = s, pct = round(100 * s / length(sets[[a]])))
+}) |> arrange(desc(shared))
+```
+
+The top two sets share 51 genes and 32 leading-edge genes (IL6, NFKB1,
+NFKBIA, TNFAIP3, CCL2, ICAM1…): the honest summary is **one finding** — an
+NF-κB/cytokine program higher in preterm — not two. Heme metabolism overlaps
+the rest at 0–5 genes.
+
+# 6. Is the ranking balanced enough to trust fgsea?
+
+```{r}
+#| label: balance
+stat_vec <- genes$stat; names(stat_vec) <- genes$feature
+stat_vec <- sort(stat_vec[!is.na(stat_vec)], decreasing = TRUE)
+ranked <- abs(stat_vec)
+sig <- stat_vec[names(stat_vec) %in% genes$feature[which(genes$padj < 0.05)]]
+top500 <- stat_vec[ranked >= quantile(ranked, 1 - 500 / length(ranked))]
+tibble(slice   = c("all genes", "padj < 0.05", "top 500 by |stat|"),
+       n       = c(length(stat_vec), length(sig), length(top500)),
+       pct_pos = c(round(100 * mean(stat_vec > 0), 1),
+                   round(100 * mean(sig > 0), 1),
+                   round(100 * mean(top500 > 0), 1)))
+```
+
+At the 500 strongest genes the ranking is a coin flip (≈ 50% positive). The
+sets that came out significant did so because their member genes **cluster**,
+not because the whole transcriptome leaned one way.
+
+# 7. Alternatives side by side
+
+**Hypergeometric on significant genes only** (universe = 13,738 tested genes,
+padj < 0.05 cutoff, BH correction): 19 sets significant among up genes — TNFα
+signalling, inflammatory response, IL6/JAK/STAT3, complement, IL2/STAT5 — and
+1 among down genes: heme metabolism.
+
+**Comparison on the same 50 Hallmark sets** (fgsea vs hypergeometric):
+
+```{r}
+#| label: compare
+cmp <- read_csv(here("data", "hallmark_methods_side_by_side.csv"), show_col_types = FALSE)
+count(cmp, direction_agrees) |> arrange(desc(n))
+```
+
+Every strong result is found by both methods, directions never disagree. The
+hypergeometric threw away information: a gene at padj = 0.049 counts the same
+as one at 1e-40, and genes significant in the other direction count against
+their set. fgsea uses the whole ranking.
+
+**fgsea on Reactome** (1,056 sets): 359 significant (210 preterm-high). Top:
+neutrophil degranulation (preterm); translation elongation/initiation and
+ribosome quality control (term) — the same inflammation and growth programs,
+at finer granularity.
+
+# 8. The species table: 53 features
+
+Default size factors gave 53 tested / **19 significant** species; with
+**poscounts** size factors, **0** remain. All 19 were artifacts of library
+composition — the poscounts table is the one used below.
+
+```{r}
+#| label: species
+species <- read_csv(here("data", "species_by_outcome.csv"), show_col_types = FALSE)
+species_stat <- species$stat; names(species_stat) <- species$feature
+species_stat <- sort(species_stat[!is.na(species_stat)], decreasing = TRUE)
+gc <- table(species$Genus)
+genus_sets <- species |>
+  filter(Genus %in% names(gc[gc >= 2])) |>
+  with(split(feature, Genus))
+fgg <- fgsea::fgsea(stats = species_stat, pathways = genus_sets,
+                    minSize = 2, maxSize = 50) |> as.data.frame() |>
+  arrange(padj) |> as_tibble()
+cat("genus sets:", length(genus_sets),
+    "| sizes:", paste(sort(lengths(genus_sets), decreasing = TRUE), collapse = ", "),
+    "| any padj < 0.05:", any(fgg$padj < 0.05))
+fgg |> select(pathway, size, NES, pval, padj) |>
+  mutate(across(where(is.numeric), \(x) signif(x, 3)))
+```
+
+The top genus is Actinomyces (2 species, NES −1.41) and the top family is its
+own Actinomycetaceae — the two levels agree on the same non-finding. Nothing
+is significant: sets of 2–12 species give fgsea almost no power. The plain
+sorted table (`data/species_sorted_by_stat.csv`, top: *Gardnerella
+swidsinskii*, stat 2.02) reaches the same conclusion without enrichment.
+
+# Choices made
+
+- Ranked genes by the DESeq2 Wald `stat`; alternative: `log2FoldChange` (ignores uncertainty).
+- Contrast preterm vs term, so NES > 0 means higher in preterm; alternative: the reverse (sign flips).
+- Gene filter: ≥ 10 reads in a quarter of the week-18 samples; alternative: stricter/looser filters.
+- Week 18 only (157 samples); alternative: all 471 samples across visits.
+- Hallmark from msigdbr as **Ensembl IDs**; alternative: gene symbols (would have matched zero times).
+- fgsea `minSize = 15, maxSize = 500`, seed 42; alternative: no size filter.
+- Hypergeometric universe: the 13,738 tested genes; alternative: all 14,226 (would count untested genes as absent).
+- Hypergeometric on padj < 0.05 up and down lists; alternative: fold-change cutoffs.
+- Reactome (`C2`, `CP:REACTOME`) as the second collection; alternative: KEGG or GO.
+- Species filter: present in ≥ 10% of week-18 samples; alternative: presence in all samples.
+- **poscounts size factors** for the species test; alternative: default size factors (19 spurious hits).
+- Genus sets with ≥ 2 species, fgsea `minSize = 2, maxSize = 50`; alternative: `minSize = 15` (excludes everything).
+- No samples dropped; no genes or species beyond the filters above.
