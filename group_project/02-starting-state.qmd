@@ -1,0 +1,186 @@
+---
+title: "Did the probiotic only work in people whose community started a certain way?"
+author: "Group project"
+format: html
+editor: source
+---
+
+## The question
+
+Everyone in the trial improved from pre to post — but did the **probiotic**
+improve people more than the **placebo**, and did that extra effect depend on
+what the vaginal community looked like **before** the intervention? A probiotic
+plausibly helps most when there is something to fix (BV-like community) and
+does little for someone already dominated by *Lactobacillus*. If so, we should
+see the probiotic-minus-placebo gap change depending on the starting state —
+statisticians call that an **interaction**.
+
+```{r setup, message = FALSE, warning = FALSE}
+library(readr)     # reading csv files
+library(dplyr)     # data wrangling
+library(tidyr)     # reshaping
+library(ggplot2)   # plots
+
+source(here::here("R/count_tables.R"))
+d <- read_counts("group_a")
+m <- d$metadata
+```
+
+## Defining "started a certain way"
+
+We use two independent definitions, so the answer does not rest on one
+arbitrary cut-off:
+
+1. **Clinical:** pre-sample Nugent score (0–10 microscope BV score).
+   `Nugent >= 7` = "BV-like start", `< 7` = "Lactobacillus-dominant start".
+2. **Microbiome:** Lactobacillus relative abundance in the pre count table.
+   `>= 50%` = "Lactobacillus-dominant start", else "diverse start".
+
+We deliberately **define the group from one source and test with the other**
+(clinical start → tested against count data; microbiome start → tested against
+clinical scores), so we are never judging a table by a group drawn from itself.
+
+"Worked" = the **Nugent score fell** from pre to post (negative change).
+
+## Who starts each way?
+
+```{r start-splits}
+# one row per person, pre and post side by side
+w <- m %>%
+  select(participant_id, arm, time_point, nugent, ph) %>%
+  pivot_wider(names_from = time_point, values_from = c(nugent, ph)) %>%
+  mutate(start_clinical = ifelse(nugent_pre >= 7, "BV-like", "Lacto-dominant"))
+
+# Lactobacillus relative abundance in the PRE sample, from the count table
+tax   <- d$taxonomy
+lacto <- tax$taxon[tax$Genus == "Lactobacillus"]
+rel   <- colSums(d$species[lacto, ]) / colSums(d$species)
+pre_rel <- rel[grepl("_pre$", names(rel))]
+w <- w %>% left_join(
+  data.frame(participant_id = sub("_pre$", "", names(pre_rel)),
+             lacto_pre = as.numeric(pre_rel)),
+  by = "participant_id"
+) %>% mutate(start_micro = ifelse(lacto_pre >= 0.5, "Lacto-dominant", "Diverse"))
+
+w %>% count(start_clinical, arm) %>% pivot_wider(names_from = arm, values_from = n)
+w %>% count(start_micro, arm)    %>% pivot_wider(names_from = arm, values_from = n)
+```
+
+## The numbers, split by starting state
+
+```{r change-tables}
+w %>% filter(!is.na(nugent_post)) %>%
+  group_by(start_clinical, arm) %>%
+  summarise(n = n(),
+            mean_change = round(mean(nugent_post - nugent_pre), 2),
+            .groups = "drop")
+
+w %>% filter(!is.na(nugent_post)) %>%
+  group_by(start_micro, arm) %>%
+  summarise(n = n(),
+            mean_change = round(mean(nugent_post - nugent_pre), 2),
+            .groups = "drop")
+```
+
+## Does the probiotic effect depend on the starting state?
+
+The model `nugent_change ~ arm * start` asks exactly our question. The
+`arm:start` row is the interaction: its p-value tells us whether the
+probiotic-vs-placebo gap differs between starting groups.
+
+```{r interactions}
+fit1 <- lm(nugent_post - nugent_pre ~ arm * start_clinical,
+           data = w, subset = !is.na(nugent_post))
+fit2 <- lm(nugent_post - nugent_pre ~ arm * start_micro,
+           data = w, subset = !is.na(nugent_post))
+
+knitr::kable(
+  data.frame(
+    definition = c("Nugent-based", "microbiome-based"),
+    interaction_estimate = c(coef(summary(fit1))[4, "Estimate"],
+                             coef(summary(fit2))[4, "Estimate"]),
+    p_value = c(coef(summary(fit1))[4, "Pr(>|t|)"],
+                coef(summary(fit2))[4, "Pr(>|t|)"])
+  ),
+  digits = 3,
+  caption = "Interaction test: does the arm effect depend on the starting state?"
+)
+```
+
+## Pictures
+
+```{r plot-splits}
+#| fig-height: 4
+#| fig-width: 9
+# Change by arm, split by each definition of the starting state
+p1 <- w %>% filter(!is.na(nugent_post)) %>%
+  ggplot(aes(x = arm, y = nugent_post - nugent_pre, fill = arm)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_boxplot(outlier.size = 0.5, show.legend = FALSE) +
+  facet_wrap(~ start_clinical) +
+  labs(title = "Nugent change by arm, split by Nugent-defined start",
+       subtitle = "Negative = improvement; dashed line = no change",
+       y = "Nugent change (post - pre)")
+p1
+```
+
+```{r plot-micro}
+#| fig-height: 4
+#| fig-width: 9
+p2 <- w %>% filter(!is.na(nugent_post)) %>%
+  ggplot(aes(x = arm, y = nugent_post - nugent_pre, fill = arm)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_boxplot(outlier.size = 0.5, show.legend = FALSE) +
+  facet_wrap(~ start_micro) +
+  labs(title = "Nugent change by arm, split by microbiome-defined start",
+       y = "Nugent change (post - pre)")
+p2
+```
+
+```{r plot-balance}
+#| fig-height: 3.5
+#| fig-width: 9
+# Why the answer is cautious: the starting states are very unbalanced
+bind_rows(
+  w %>% count(definition = "Nugent-based", start = start_clinical, arm),
+  w %>% count(definition = "microbiome-based", start = start_micro, arm)
+) %>%
+  ggplot(aes(x = start, y = n, fill = arm)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ definition) +
+  labs(title = "People per starting state and arm — the small cells are the problem",
+       x = "starting state", y = "people")
+```
+
+## Answer
+
+**No detectable dependence on starting state — but the data barely allow the
+question.**
+
+- The interaction p-values are **0.63** (Nugent-defined) and **0.42**
+  (microbiome-defined): no evidence that the probiotic's extra effect differs
+  by starting state.
+- **161 of 176 people started BV-like**, so the "already healthy" stratum holds
+  3 placebo and 12 probiotic people — the microbiome-based split is even worse
+  (2 placebo vs 12). Estimates from those cells are noise.
+- The placebo arm improved almost as much as the probiotic arm (−3.23 vs
+  −4.06 Nugent points among BV-like starters), so the overall probiotic effect
+  is modest to begin with (p ≈ 0.19).
+
+In plain words: everyone got better regardless of arm or starting state, and
+this trial was not designed to detect differences among starting states
+because almost everyone started the same way.
+
+## Choices made
+
+- Defined starting state **clinically** (Nugent ≥ 7) and **microbiomically** (Lactobacillus relative abundance ≥ 50%) and reported both; alternative: one cut-off only.
+- Outcome = change in Nugent score; alternative: change in pH or cytokines, left for later documents.
+- Defined the group from one data source and tested with the other (per workshop rule); alternative: defining and testing from the same table.
+- Used `lm()` with an arm × start interaction; alternative: two separate tests per stratum, which answers a different (weaker) question.
+- Excluded the 2 samples with missing post Nugent from the change analyses (n = 350 of 352); alternative: imputing, which we did not do.
+- Set the Lactobacillus dominance threshold at 50% relative abundance; alternative: a dominant-taxon rule, not chosen for simplicity.
+- Did not drop any samples; alternative: excluding `A116_pre` for its tiny library (604 reads), deferred to the DESeq2 step where filtering matters.
+
+```{r session, echo = FALSE}
+sessionInfo()
+```

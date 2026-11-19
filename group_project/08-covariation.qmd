@@ -1,0 +1,288 @@
+---
+title: "Do pH, Nugent score and cytokines move with the community change, or on their own?"
+subtitle: "Study A — change-vs-change analysis, pre to post"
+format: html
+---
+
+**The question.** Everyone in Study A improved on average between the pre and
+post visits. But when the vaginal *community* changed in a person, did pH,
+the Nugent score and the cytokines move **with** that change — or do they
+follow their own clock, shifting over time no matter what the community did?
+
+**Design.** For every person we compute one number per measurement: the
+change from pre to post. Then we ask whether those changes **travel
+together**:
+
+- **Community change** = change in the Lactobacillus share of reads (from the
+  microbiome count table) and the Bray–Curtis distance between a person's
+  pre and post samples (how much the whole community moved, 0 = identical).
+- **Marker change** = change in pH, Nugent (clinical metadata) and each
+  cytokine (cytokine table — a *different* table than the one defining the
+  community change, per the workshop rule).
+- If a marker's change correlates with the community change, it moves *with*
+  the community. If a marker shifts pre→post overall but does **not**
+  correlate with the community change, it moves *on its own*.
+
+```{r}
+#| label: setup
+#| message: false
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+source(here::here("R/count_tables.R"))
+d <- read_counts("group_a")
+m <- d$metadata
+
+# Community change, from the microbiome count table
+rel   <- sweep(d$species, 2, colSums(d$species), "/")
+lacto <- colSums(rel[grep("^lactobacillus", rownames(rel)), , drop = FALSE])
+lacto_pre  <- setNames(lacto[m$sample_id[m$time_point == "pre"]],
+                       m$participant_id[m$time_point == "pre"])
+lacto_post <- setNames(lacto[m$sample_id[m$time_point == "post"]],
+                       m$participant_id[m$time_point == "post"])
+pre_ids  <- m$sample_id[m$time_point == "pre"]
+post_ids <- m$sample_id[m$time_point == "post"]
+# Bray-Curtis: sum of |share differences| / 2, per person
+bc <- setNames(
+  sapply(seq_along(pre_ids),
+         function(i) sum(abs(rel[, pre_ids[i]] - rel[, post_ids[i]])) / 2),
+  m$participant_id[m$time_point == "pre"])
+
+# Clinical changes, pre to post, one row per person
+clin_pre  <- filter(m, time_point == "pre")  |> transmute(participant_id, ph_pre = ph, nugent_pre = nugent)
+clin_post <- filter(m, time_point == "post") |> transmute(participant_id, ph_post = ph, nugent_post = nugent)
+
+# Cytokine changes: pre/post columns side by side
+cy <- d$cytokines
+cy$pid <- sub("_(pre|post)$", "", cy$sample_id)
+cy$tp  <- sub(".*_", "", cy$sample_id)
+cyk <- cy |>
+  select(-sample_id) |>
+  pivot_wider(names_from = tp, values_from = where(is.numeric),
+              names_glue = "{.value}_{tp}")
+
+people <- clin_pre |>
+  left_join(clin_post, by = "participant_id") |>
+  left_join(cyk, by = c("participant_id" = "pid")) |>
+  mutate(
+    delta_lacto = lacto_post[participant_id] - lacto_pre[participant_id],
+    bc = bc[participant_id],
+    d_ph = ph_post - ph_pre,
+    d_nug = nugent_post - nugent_pre
+  )
+
+cytokine_names <- setdiff(names(d$cytokines), "sample_id")
+for (v in cytokine_names) {
+  people[[paste0("d_", v)]] <- people[[paste0(v, "_post")]] - people[[paste0(v, "_pre")]]
+}
+```
+
+# Plot 1 (barchart): which markers' changes track the community?
+
+One bar per marker: the Spearman correlation between that marker's change and
+the Lactobacillus-share change. Bars reaching right = moves with the
+community; bars near zero = moves on its own. Filled bars survive a
+multiple-testing correction (Benjamini–Hochberg across the 20 markers).
+
+```{r}
+#| label: barchart
+markers <- c("pH" = "d_ph", "Nugent" = "d_nug",
+             setNames(paste0("d_", cytokine_names), cytokine_names))
+
+cor_tab <- tibble(
+  marker = names(markers),
+  rho = sapply(markers, function(v)
+    suppressWarnings(cor(people[[v]], people$delta_lacto,
+                         use = "complete.obs", method = "spearman"))),
+  p = sapply(markers, function(v)
+    suppressWarnings(cor.test(people[[v]], people$delta_lacto,
+                              method = "spearman"))$p.value)
+) |>
+  mutate(p_adj = p.adjust(p, "BH"), significant = p_adj < 0.05) |>
+  arrange(rho) |>
+  mutate(marker = factor(marker, marker))
+
+p1 <- ggplot(cor_tab, aes(rho, marker, fill = significant)) +
+  geom_col() +
+  geom_vline(xintercept = 0) +
+  scale_fill_manual(values = c(`TRUE` = "steelblue", `FALSE` = "grey70"),
+                    name = "survives FDR 5%") +
+  labs(x = "Spearman rho: marker change vs Lactobacillus-share change",
+       y = NULL,
+       title = "pH and Nugent travel with the community; most cytokines do not",
+       subtitle = "Right = marker improves as the community gains Lactobacillus (pH and Nugent are 'lower is better')")
+p1
+ggsave(here::here("group_project/08-corr-barchart.png"), p1, width = 8, height = 6, dpi = 150)
+```
+
+# Plot 2 (boxplot): which markers shift over time at all?
+
+Pre vs post distributions. A marker that shifts here but had a bar near zero
+in Plot 1 moves **on its own**. (Cytokines on a log scale — they are very
+skewed.)
+
+```{r}
+#| label: boxplot
+show_markers <- c("pH", "Nugent", "il_1b", "ip_10", "il_8", "tnfa")
+long <- bind_rows(
+  people |> transmute(participant_id,
+                      marker = "pH", pre = ph_pre, post = ph_post),
+  people |> transmute(participant_id,
+                      marker = "Nugent", pre = nugent_pre, post = nugent_post),
+  bind_rows(lapply(setdiff(show_markers, c("pH", "Nugent")), function(v)
+    people |> transmute(participant_id, marker = !!v,
+                        pre = .data[[paste0(v, "_pre")]],
+                        post = .data[[paste0(v, "_post")]])))
+) |>
+  mutate(marker = factor(marker, show_markers),
+         value = ifelse(marker %in% c("pH", "Nugent"), pre + post, NA)) |>
+  select(-value) |>
+  pivot_longer(c(pre, post), names_to = "visit", values_to = "level") |>
+  mutate(log_level = ifelse(marker %in% c("pH", "Nugent"), level, log10(level)))
+
+p2 <- ggplot(long, aes(visit, log_level, fill = visit)) +
+  geom_boxplot(width = 0.6) +
+  facet_wrap(~marker, scales = "free",
+             labeller = labeller(marker = c(il_1b = "IL-1beta (log)",
+                                            ip_10 = "IP-10 (log)",
+                                            il_8 = "IL-8 (log)",
+                                            tnfa = "TNF-alpha (log)"))) +
+  scale_fill_manual(values = c(pre = "grey60", post = "steelblue"), guide = "none") +
+  labs(x = NULL,
+       y = "value (log scale for cytokines)",
+       title = "Almost everything improves on average — but that is not the question",
+       subtitle = "The question is whether each person's change matched their community change (Plot 1 and Plot 3)")
+p2
+ggsave(here::here("group_project/08-prepost-boxplot.png"), p2, width = 8, height = 5, dpi = 150)
+```
+
+# Plot 3 (scatters): the community change against the two strongest followers
+
+Each point is a person. If pH and Nugent really move *with* the community,
+the points should form a clear slope — and they do.
+
+```{r}
+#| label: scatter
+scat <- people |>
+  select(delta_lacto, d_ph, d_nug) |>
+  pivot_longer(c(d_ph, d_nug), names_to = "marker", values_to = "change") |>
+  mutate(marker = recode(marker, d_ph = "pH change (lower = better)",
+                         d_nug = "Nugent change (lower = better)"))
+
+p3 <- ggplot(scat, aes(delta_lacto, change)) +
+  geom_point(alpha = 0.45, size = 1.6, colour = "steelblue") +
+  geom_smooth(method = "lm", se = TRUE, colour = "grey25") +
+  facet_wrap(~marker, scales = "free_y") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "change in Lactobacillus share of reads (post minus pre)",
+       y = NULL,
+       title = "The more the community gained Lactobacillus, the more pH and Nugent fell",
+       subtitle = "Spearman rho = -0.52 (pH) and -0.81 (Nugent)")
+p3
+ggsave(here::here("group_project/08-scatter.png"), p3, width = 8, height = 4.5, dpi = 150)
+```
+
+# The tests
+
+Two questions per marker: does it change over time (paired Wilcoxon), and
+does its change match the community change (Spearman, BH-adjusted across
+markers)?
+
+```{r}
+#| label: tests
+# Compute ALL columns first, then sort — sorting first would shift the
+# later columns onto the wrong rows.
+prepost <- c(pH = "ph", Nugent = "nugent",
+             setNames(cytokine_names, cytokine_names))
+tests <- tibble(
+  marker = names(markers),
+  rho = sapply(markers, function(v)
+    suppressWarnings(cor(people[[v]], people$delta_lacto,
+                         use = "complete.obs", method = "spearman"))),
+  p = sapply(markers, function(v)
+    suppressWarnings(cor.test(people[[v]], people$delta_lacto,
+                              method = "spearman"))$p.value),
+  rho_bc = sapply(markers, function(v)
+    suppressWarnings(cor(people[[v]], people$bc,
+                         use = "complete.obs", method = "spearman"))),
+  wilcox_p = sapply(names(markers), function(mk) {
+    base <- prepost[[mk]]
+    suppressWarnings(
+      wilcox.test(people[[paste0(base, "_post")]],
+                  people[[paste0(base, "_pre")]], paired = TRUE)$p.value)
+  })
+) |>
+  mutate(p_adj = p.adjust(p, "BH")) |>
+  arrange(rho) |>
+  select(marker, rho, p, p_adj, rho_bc, wilcox_p)
+
+tests |> mutate(across(where(is.numeric), ~ signif(.x, 2))) |> knitr::kable()
+```
+
+# Verdict
+
+**pH and the Nugent score move with the community; the cytokines are split.**
+
+- **Nugent: with the community, overwhelmingly** — rho = −0.81 with the
+  Lactobacillus change, −0.71 with the overall Bray–Curtis move. Makes
+  sense: the Nugent score literally grades the community.
+- **pH: with the community** — rho = −0.52. More Lactobacillus, lower
+  (more acidic) pH, exactly the expected biology. pH and Nugent changes
+  also track each other (rho = 0.49).
+- **IL-1β: partly with the community** — rho = −0.26, survives the
+  correction. Falls as Lactobacillus rises, but weakly.
+- **IP-10: moves with the community, but the *wrong* way for inflammation**
+  — rho = +0.49, and it *rises* on average (p ≈ 1e-7) as everything else
+  calms down. An interferon-driven chemokine going up while the community
+  improves is genuinely interesting — worth its own look one day.
+- **IL-8, IL-6, TNFα, MIP-1α and the rest: on their own** — bars near zero.
+  IL-8 does not even change on average (p = 0.81). Their levels shift (or
+  don't) without regard to how much the community moved.
+
+**Caveats:** correlation of changes cannot prove direction (community →
+marker vs marker → community); the Bray–Curtis distance is directionless and
+most people improved, so "big move" here mostly means "big improvement";
+relative abundance is compositional; and both arms are pooled (the
+correlations look similar in both — the probiotic arm simply moved a bit
+more).
+
+**How to check me yourself:** in Plot 3, count the points in the Nugent
+panel with delta_lacto > 0.8 and positive Nugent change — there should be
+almost none, which is what rho = −0.81 looks like. And in the tests table,
+the pH row should show rho = −0.52 with p_adj below 0.001; if not, the
+per-person join broke.
+
+## Choices made
+
+- **Change-vs-change (paired deltas) design** — each person is their own
+  control, so starting levels cannot create fake correlations. Alternative
+  not chosen: correlate *post* levels with *post* communities (confounded by
+  baseline).
+- **Community change = Lactobacillus-share change + Bray–Curtis distance** —
+  one directional, one magnitude measure. Alternative not chosen: an
+  ordination axis (harder to explain).
+- **Bray–Curtis computed by hand on relative abundance** (sum of absolute
+  share differences / 2), not from a package — same number, no extra
+  dependency. Alternative not chosen: Aitchison distance on CLR values
+  (better for compositional data, less familiar).
+- **Spearman correlations**, not Pearson — cytokine changes are heavily
+  skewed and Spearman only cares about ranks. Alternative not chosen:
+  Pearson on log-transformed values.
+- **Multiple-testing correction: BH across the 20 markers** — with 20
+  correlations, one or two "significant" hits would appear by chance.
+  Alternative not chosen: report raw p-values (overstates the evidence).
+- **"Moves over time" tested with paired Wilcoxon** per marker.
+  Alternative not chosen: paired t-test (skewed data).
+- **Pooled both arms** — the question is about biology, not the treatment;
+  arm differences in the community change are small (mean ΔLactobacillus
+  0.43 vs 0.39). Alternative not chosen: stratify by arm (halves the sample
+  in each correlation).
+- **Missing values left missing** (pH: 1 person, post Nugent: 2, cytokines:
+  A069_post) — each correlation uses whoever has both measurements.
+  Alternative not chosen: impute.
+- **Shallow sample A116_pre kept** (same reasoning as before; listed as a
+  pending sensitivity check).
+- **Cytokine boxplots on a log scale** — raw concentrations span four
+  orders of magnitude. Alternative not chosen: raw axis (boxes become a
+  single smear).

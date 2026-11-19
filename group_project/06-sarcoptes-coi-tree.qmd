@@ -1,0 +1,324 @@
+---
+title: "Phylogenetic tree of *Sarcoptes scabiei* sequences from human hosts"
+format:
+  html:
+    fig-width: 10
+    fig-height: 9
+---
+
+## Aim
+
+The sheet `.github/Sarcoptes_human_accessions.csv` lists representative GenBank
+accessions for *Sarcoptes scabiei* (itch mite) protein sequences sampled from
+**human** hosts. Each row is one "cluster" of near-identical sequences; the
+column `n (sequences in cluster)` says how many sequences the cluster stood in
+for (cluster sizes were read by eye from a figure, so they are approximate).
+
+Here we turn those accessions into a **phylogenetic tree** ("who is related to
+whom") in four steps:
+
+1. Download the 64 protein sequences from NCBI using the accessions.
+2. Keep only the **COI** sequences (cytochrome oxidase subunit I, the standard
+   mite barcoding gene) — these are the sequences that are biologically
+   comparable to each other.
+3. Align the COI sequences with **MAFFT**.
+4. Build a **neighbour-joining tree** with **ape**, and measure how reliable
+   each branch is with a **bootstrap**.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+suppressPackageStartupMessages({
+  library(here)
+  library(Biostrings)  # reads FASTA files
+  library(ape)         # tree building (nj, dist.aa, boot.phylo)
+})
+```
+
+## Read the accession sheet
+
+The sheet uses old Mac-style line breaks (`\r`), which `read.csv()` handles
+automatically. Rows at the bottom (Total, notes) are dropped by keeping rows
+with a non-empty accession.
+
+```{r accessions}
+x <- read.csv(here(".github", "Sarcoptes_human_accessions.csv"))
+x <- x[x$Representative.accession != "" & !is.na(x$Representative.accession), ]
+colnames(x)[4] <- "n_cluster"
+nrow(x)
+```
+
+`r nrow(x)` representative accessions in total.
+
+## Download the sequences from NCBI
+
+One call to NCBI's `efetch` service fetches all sequences as FASTA. The file is
+cached on disk, so re-rendering this document does not re-download it.
+
+```{r fetch, cache=FALSE}
+fa <- here("group_project", "sarcoptes_human.fasta")
+if (!file.exists(fa)) {
+  url <- sprintf(
+    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=protein&id=%s&rettype=fasta&retmode=text",
+    paste(x$Representative.accession, collapse = ","))
+  download.file(url, fa, mode = "wb")
+}
+seqs <- readAAStringSet(fa)  # a named vector of protein sequences
+length(seqs)
+```
+
+For the circular all-sequences figure later, we also align **all 64**
+sequences (cached, like everything else):
+
+```{r align-all}
+human_aln_fa <- here("group_project", "sarcoptes_human.aln.fasta")
+if (!file.exists(human_aln_fa)) {
+  status <- system2("mafft", c("--auto", "--quiet", fa), stdout = human_aln_fa)
+  stopifnot(status == 0)
+}
+cat("full alignment cached at", basename(human_aln_fa), "\n")
+```
+
+## Keep only COI
+
+```{r coi-count}
+head(names(seqs), 3)
+```
+
+```{r coi-subset}
+is_coi <- grepl("cytochrome (c )?oxidase subunit I", names(seqs)) &
+          !grepl("subunit II", names(seqs))
+cat("COI sequences:", sum(is_coi),
+    "| other proteins:", sum(!is_coi), "\n")
+```
+
+The other `r sum(!is_coi)` sequences are assorted proteins — allergens
+(Sar s 1), paramyosin, myosin, a sodium channel, a trypsin-like protease and
+so on. They are *different genes*, so they cannot be meaningfully compared
+against COI and are left out of the tree (listed in the appendix).
+
+```{r write-coi}
+coi_fa     <- here("group_project", "sarcoptes_coi.fasta")
+coi_aln_fa <- here("group_project", "sarcoptes_coi.aln.fasta")
+writeXStringSet(seqs[is_coi], coi_fa)
+```
+
+## Align with MAFFT
+
+MAFFT (Multiple Alignment using Fast Fourier Transform) lines the sequences up
+so that matching amino acids sit in the same column. `--auto` lets MAFFT pick
+a sensible strategy for the dataset size.
+
+```{r mafft}
+if (!file.exists(coi_aln_fa)) {
+  status <- system2("mafft", c("--auto", "--quiet", coi_fa), stdout = coi_aln_fa)
+  stopifnot(status == 0)
+}
+aln <- as.matrix(readAAStringSet(coi_aln_fa))
+dim(aln)  # sequences x aligned positions
+```
+
+## Build the tree (neighbour joining + bootstrap)
+
+**Neighbour joining** builds the tree by repeatedly joining the two sequences
+that look most different-overall, using pairwise amino-acid distances
+(`dist.aa`, a Dayhoff-style protein distance). It is fast and standard for a
+first look; a more rigorous option would be maximum likelihood.
+
+The **bootstrap** (100 replicates) re-runs the analysis on randomly resampled
+alignment columns. A branch supported in ≥70% of replicates is usually
+considered solid.
+
+```{r tree}
+d  <- dist.aa(aln, pairwise = TRUE)   # handles gapped columns pair by pair
+tr <- ladderize(nj(d))
+
+# shorter tip labels: accession + cluster size, e.g. "WHU50584.1 (n=105)"
+acc_of <- sub(" .*", "", names(seqs)[is_coi])
+nmap <- setNames(x$n_cluster, x$Representative.accession)
+tr$tip.label <- paste0(acc_of, " (n=", nmap[acc_of], ")")
+
+# bootstrap support for each internal branch
+bs <- boot.phylo(ladderize(nj(d)), aln,
+                 function(z) nj(dist.aa(z, pairwise = TRUE)),
+                 B = 100, trees = FALSE)
+bs[is.na(bs)] <- 0  # the root position has no bootstrap value
+tr$node.label <- bs
+```
+
+```{r tree-plot, fig.cap="Figure 1. Neighbour-joining tree of the 43 COI protein sequences of *Sarcoptes scabiei* from human hosts.", fig.dpi=300}
+write.tree(tr, here("group_project", "sarcoptes_coi.nwk"))
+plot(tr, type = "phylogram", cex = 0.65, label.offset = 0.004, no.margin = TRUE)
+n <- length(tr$tip.label)
+# bootstrap numbers at each branch point, green when solid
+nodelabels(text = as.character(tr$node.label), node = (n + 1):(n + tr$Nnode),
+           frame = "none", cex = 0.5, adj = c(0.5, -0.3),
+           col = ifelse(tr$node.label >= 70, "darkgreen", "grey45"))
+add.scale.bar(length = 0.1)  # 0.1 = 10% amino-acid difference
+title(main = "Sarcoptes scabiei var. hominis — database retrieved 531 proteins",
+      sub  = "43 COI representatives · neighbour joining on Dayhoff protein distances · bootstrap support (green = ≥ 70%)",
+      cex.sub = 0.8, line = 0.5)
+```
+
+## Circular view of all 64 sequences
+
+For completeness, the **full set of 64 sequences** (COI plus the other
+proteins) drawn as a **circular cladogram** — same grouping logic as above
+(neighbour joining), but drawn in a circle with equal-length branches so all
+64 labels stay readable. Six accessions of interest are highlighted in their
+own colours; everything else is grey. Because the tips here are a mix of
+different genes, the branch arrangement mostly reflects *which protein* a
+sequence is, not mite ancestry — this figure is for spotting individual
+accessions, not for reading evolution off.
+
+```{r circular-tree}
+# full 64-sequence alignment (already produced when every sequence was
+# downloaded and aligned before the COI subset was made)
+aln64 <- as.matrix(readAAStringSet(here("group_project", "sarcoptes_human.aln.fasta")))
+d64  <- dist.aa(aln64, pairwise = TRUE)
+tr64 <- ladderize(nj(d64))
+acc64 <- sub(" .*", "", tr64$tip.label)
+tr64$tip.label <- paste0(acc64, " (n=", nmap[acc64], ")")
+
+hi  <- c("AAS93675.1", "AAS93667.1", "AAS93669.1",
+         "AAO15606.1", "AAO15613.1", "CAL18242.1")
+pal <- c("red", "darkorange3", "purple",
+         "dodgerblue3", "forestgreen", "magenta")
+names(pal) <- hi
+tipcol <- ifelse(acc64 %in% hi, pal[acc64], "black")  # black = easier to read in print
+stopifnot(!any(is.na(tipcol)))  # all six must be present in the 64
+```
+
+```{r}
+#| label: circular-plot
+#| fig.cap: "Figure 2. Circular cladogram of all 64 Sarcoptes scabiei protein sequences from human hosts."
+#| fig.dpi: 300
+#| fig-width: 10
+#| fig-height: 10
+plot(tr64, type = "fan", use.edge.length = FALSE, cex = 0.68, font = 2,
+     tip.color = tipcol, show.node.label = FALSE, edge.width = 1.1,
+     rotate = 20)
+legend("bottomleft", legend = hi, col = pal, pch = 16, pt.cex = 1.4,
+       cex = 0.95, bty = "n", title = "highlighted accessions")
+title(main = "Sarcoptes scabiei var. hominis — database retrieved 531 proteins (all 64 representatives)",
+      cex.main = 1.15)
+```
+
+> **Figure 2. Circular cladogram of all 64 representative protein sequences
+> from *Sarcoptes scabiei* var. *hominis* (database retrieved 531 proteins).** Neighbour joining on
+> Dayhoff protein distances, drawn with equal-length branches (a cladogram) in
+> a circular layout so that all labels are legible. Each labelled accession
+> stands in for a cluster of near-identical sequences (cluster size in
+> brackets). The six highlighted accessions are AAS93675.1 (red), AAS93667.1
+> (orange), AAS93669.1 (purple), AAO15606.1 (blue), AAO15613.1 (green) and
+> CAL18242.1 (magenta). Because the set mixes different genes, the grouping
+> mainly separates protein types (COI vs allergens vs muscle proteins, etc.)
+> and should not be read as a species phylogeny. **Tree scale:** not
+> applicable — branches are drawn with equal lengths for legibility, so only
+> the grouping (topology), not distances, is informative in this figure.
+
+## Caption for Figure 1
+
+> **Figure 1. Neighbour-joining phylogeny of mitochondrial COI protein
+> sequences from *Sarcoptes scabiei* var. *hominis* sampled from human
+> hosts (database retrieved 531 proteins; 43 COI representatives shown).**
+> The 43 representative COI accessions from `.github/Sarcoptes_human_accessions.csv`
+> were downloaded from NCBI, aligned with MAFFT (`--auto`), and their amino-acid
+> distances used to build an unrooted neighbour-joining tree with ape. Tip
+> labels give the GenBank accession and, in brackets, how many near-identical
+> sequences the representative stood for (cluster sizes read by eye from the
+> source figure). Numbers at internal nodes are bootstrap support from 100
+> resamplings of alignment columns; green values (≥ 70%) indicate well
+> supported groups. **Tree scale:** branch lengths are in substitutions per
+> amino-acid site; the scale bar corresponds to 0.1. Because each sequence is
+> a partial fragment (40–275 amino acids) and many deep branches have low
+> support, the tree should be read as a first-pass clustering of the available
+> human-host COI sequences rather than a definitive mite phylogeny.
+
+## Description of this work
+
+**What a phylogenetic tree is.** A tree is a hypothesis about ancestry: tips
+that join close together share a more recent common ancestor than tips that
+join far apart. Branch length is proportional to how much the sequences differ.
+
+**What we did, in plain words.**
+
+1. The sheet lists one representative accession per cluster of near-identical
+   sequences — 64 representatives standing in for 531 sequences (the sheet's
+   own note says 532 was the intended total; a small reading error, harmless
+   here since we only use the representatives).
+2. From NCBI we pulled the protein sequence behind each accession. Inspection
+   showed they are **not all the same gene**: 43 are mitochondrial **COI**
+   (the mite barcoding gene) and 21 are unrelated proteins (allergens,
+   muscle proteins, detoxification enzymes, etc.).
+3. Because only same-gene sequences are comparable, we kept the 43 COI ones.
+   MAFFT lined them up (283 aligned columns).
+4. `dist.aa()` summarised each pair of sequences as one distance (roughly:
+   how many amino-acid positions differ, corrected for invisible changes),
+   and neighbour joining turned those distances into the tree.
+5. The bootstrap asks: if we resample the alignment columns, does the same
+   group keep appearing? Groups that survive ≥ 70% of resamplings are drawn
+   in green above.
+
+**What the tree shows.** Most human-host COI sequences sit on long branches
+with weak deep support — consistent with a diverse set of mites collected from
+many patients. A few tight clusters with high support (e.g. the accession
+pairs around QIK02… and WKB12…) are groups of nearly identical sequences.
+The exact membership of deeper clusters is not resolved by these short
+fragments; more (or longer) sequences would be needed for that.
+
+**Caveats, honestly stated.**
+
+- Sequences are short partial fragments (40–275 aa); short alignments give
+  shaky support values, which is exactly what we see.
+- `dist.aa` treats gaps pair by pair (`pairwise = TRUE`); with fragments of
+  different lengths, pairs only share part of the alignment.
+- The tree is unrooted — it shows relatedness but does not say which lineage
+  is "oldest".
+- This is a protein-level tree of a mitochondrial gene sampled **only from
+  human hosts**; it cannot speak to mites on other animals (dogs, pigs,
+  wildlife), so it is not evidence about cross-host transmission.
+
+**How you could check this yourself.** Pick any two tips joined at a green
+node — e.g. WHU50584.1 and its neighbour — and BLAST one against the other at
+<https://blast.ncbi.nlm.nih.gov> ("blastp"): near-identical sequences will
+report ~100% identity, which is the tree's claim, checked independently. You
+can also re-render this document after deleting
+`group_project/sarcoptes_coi.aln.fasta` to confirm MAFFT gives the same
+alignment twice.
+
+## Appendix: accessions excluded (non-COI proteins)
+
+```{r excluded}
+data.frame(protein = sub("^[^ ]+ ", "", names(seqs)[!is_coi]),
+           accession = sub(" .*", "", names(seqs)[!is_coi]))
+```
+
+## Choices made
+
+- Kept only COI sequences for the tree — alternative: build one tree of all 64
+  sequences, which mixes unrelated genes and produces a meaningless jumble of
+  long branches.
+- Amino-acid (protein) distances with `dist.aa`, Dayhoff-type correction —
+  alternative: convert back to nucleotides and use `dist.dna` (K80), but we
+  only had protein sequences.
+- Neighbour joining — alternative: maximum likelihood (more rigorous, much
+  slower; overkill for a first look at 43 short fragments).
+- MAFFT `--auto` alignment — alternative: ClustalW, generally less accurate.
+- Gaps handled pairwise in the distance — alternative: strip all gapped
+  columns first, which would discard most of this short alignment.
+- 100 bootstrap replicates, ≥ 70% considered solid — alternative: 1,000
+  replicates (tighter support estimates, ~10× slower).
+- Tree left unrooted (no outgroup available: no non-human-host COI sequence in
+  the sheet) — alternative: midpoint rooting, which assumes the two most
+  distant sequences bracket the root and can be misleading.
+- Cluster sizes shown in the tip labels as `(n=…)` — alternative: drawing tip
+  circles whose size scales with `n`, prettier but harder to read exact values.
+- Cluster sizes taken as given from the sheet (read by eye from a figure) —
+  alternative: re-export the collapse table for exact counts.
+- Figure 2 drawn as a **circular cladogram** with equal-length branches —
+  alternative: keep real branch lengths (a distance fan), which is more
+  faithful but unreadable here because the unrelated proteins sit on extremely
+  long branches that squash the COI cluster into a sliver.
+- Non-highlighted tips in plain grey, each highlighted accession in its own
+  colour — alternative: one single colour for all six, or scaling the colour
+  brightness by cluster size.

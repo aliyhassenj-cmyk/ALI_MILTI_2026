@@ -1,0 +1,86 @@
+---
+title: "Phylogenetic analysis of *Sarcoptes scabiei* var. *hominis* proteins"
+format: docx
+---
+
+**Sarcoptes scabiei** var. **hominis** — phylogenetic trees derived from a
+database of 531 retrieved proteins. Representative sequences were taken from
+`.github/Sarcoptes_human_accessions.csv`: 64 representative accessions, each
+standing in for a cluster of near-identical sequences (cluster sizes shown in
+brackets after each accession). Full methods, code and reproducibility notes
+are in `06-sarcoptes-coi-tree.html`.
+
+## Figure 1
+
+![Neighbour-joining tree of the 43 COI representatives](06-sarcoptes-coi-tree_files/figure-html/tree-plot-1.png)
+
+**Figure 1. Neighbour-joining phylogeny of mitochondrial COI protein sequences
+from *Sarcoptes scabiei* var. *hominis* sampled from human hosts (database
+retrieved 531 proteins; 43 COI representatives shown).** The 43 representative
+COI accessions were downloaded from NCBI, aligned with MAFFT (`--auto`), and
+their amino-acid distances used to build an unrooted neighbour-joining tree in
+ape. Tip labels give the GenBank accession and, in brackets, the number of
+near-identical sequences the representative stands for. Numbers at internal
+nodes are bootstrap support from 100 resamplings of alignment columns; green
+values (≥ 70%) indicate well supported groups. **Tree scale:** branch lengths
+are in substitutions per amino-acid site; the scale bar corresponds to 0.1.
+Sequences are partial fragments (40–275 amino acids), so deep branches carry
+low support; the tree is a first-pass clustering of the available human-host
+COI sequences, not a definitive mite phylogeny.
+
+## Figure 2
+
+![Circular cladogram of all 64 representatives](06-sarcoptes-coi-tree_files/figure-html/circular-plot-1.png)
+
+**Figure 2. Circular cladogram of all 64 representative protein sequences from
+*Sarcoptes scabiei* var. *hominis* (database retrieved 531 proteins).**
+Neighbour joining on Dayhoff protein distances, drawn with equal-length
+branches in a circular layout so that all labels are legible. Each labelled
+accession stands in for a cluster of near-identical sequences (cluster size in
+brackets). The six highlighted accessions are AAS93675.1 (red), AAS93667.1
+(orange), AAS93669.1 (purple), AAO15606.1 (blue), AAO15613.1 (green) and
+CAL18242.1 (magenta). Because the set mixes different genes, the grouping
+mainly separates protein types (COI vs allergens vs muscle proteins, etc.).
+**Tree scale:** not applicable — branches are drawn with equal lengths for
+legibility, so only the grouping (topology), not distances, is informative in
+this figure.
+
+## Methods summary
+
+1. Representative accessions were read from
+   `.github/Sarcoptes_human_accessions.csv` (64 representatives standing in
+   for 531 sequences).
+2. Protein sequences were retrieved from NCBI GenBank with the E-utilities
+   `efetch` service.
+3. Sequences were aligned with MAFFT (`--auto`).
+4. Pairwise amino-acid distances (Dayhoff-type correction, gaps handled
+   pairwise) were computed with ape's `dist.aa`.
+5. Trees were built by neighbour joining (`ape::nj`) and drawn with
+   `ape::plot.phylo` (rectangular for COI; circular cladogram for all 64).
+6. Branch reliability was estimated by non-parametric bootstrap (100
+   replicates of alignment columns).
+
+## Choices made
+
+- Kept only COI sequences for Figure 1 — alternative: one tree of all 64
+  sequences, which mixes unrelated genes.
+- Amino-acid (protein) distances with `dist.aa` — alternative: nucleotide
+  distances with `dist.dna` (only protein sequences available).
+- Neighbour joining — alternative: maximum likelihood (more rigorous, much
+  slower).
+- MAFFT `--auto` alignment — alternative: ClustalW, generally less accurate.
+- Gaps handled pairwise in the distance — alternative: strip all gapped
+  columns, which would discard most of this short alignment.
+- 100 bootstrap replicates, ≥ 70% considered solid — alternative: 1,000
+  replicates (tighter estimates, ~10× slower).
+- Tree left unrooted — alternative: midpoint rooting, which assumes the two
+  most distant sequences bracket the root.
+- Cluster sizes shown in tip labels as `(n=…)` — alternative: circles scaled
+  by `n`.
+- Figure 2 drawn as a circular cladogram with equal-length branches —
+  alternative: distance fan, unreadable because unrelated proteins sit on
+  extremely long branches.
+- Non-highlighted tips grey, each highlighted accession in its own colour —
+  alternative: one colour for all six.
+- Cluster sizes taken as given from the sheet (read by eye from a figure) —
+  alternative: re-export the collapse table for exact counts.

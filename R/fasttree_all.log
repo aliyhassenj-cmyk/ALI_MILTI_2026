@@ -1,0 +1,37 @@
+FastTree Version 2.1.11 Double precision (No SSE3)
+Alignment: all_aligned.fasta
+Amino acid distances: BLOSUM45 Joins: balanced Support: SH-like 1000
+Search: Normal +NNI +SPR (2 rounds range 10) +ML-NNI opt-each=1
+TopHits: 1.00*sqrtN close=default refresh=0.80
+ML Model: Jones-Taylor-Thorton, CAT approximation with 20 rate categories
+Ignored unknown character X (seen 7 times)
+Initial topology in 0.12 seconds
+Refining topology: 26 rounds ME-NNIs, 2 rounds ME-SPRs, 13 rounds ML-NNIs
+      0.11 seconds: ME NNI round 1 of 26, 1 of 91 splits
+      0.42 seconds: SPR round   1 of   2, 101 of 184 nodes
+      0.62 seconds: ME NNI round 9 of 26, 1 of 91 splits
+      0.99 seconds: SPR round   2 of   2, 101 of 184 nodes
+      1.13 seconds: ME NNI round 17 of 26, 1 of 91 splits
+Total branch-length 22.618 after 1.19 sec
+ML-NNI round 1: LogLk = -28171.492 NNIs 48 max delta 4.09 Time 5.96
+      6.00 seconds: Site likelihoods with rate category 1 of 20
+      6.13 seconds: Site likelihoods with rate category 4 of 20
+      6.25 seconds: Site likelihoods with rate category 6 of 20
+      6.38 seconds: Site likelihoods with rate category 9 of 20
+      6.51 seconds: Site likelihoods with rate category 12 of 20
+      6.64 seconds: Site likelihoods with rate category 15 of 20
+      6.76 seconds: Site likelihoods with rate category 18 of 20
+Switched to using 20 rate categories (CAT approximation)
+Rate categories were divided by 0.766 so that average rate = 1.0
+CAT-based log-likelihoods may not be comparable across runs
+Use -gamma for approximate but comparable Gamma(20) log-likelihoods
+      6.93 seconds: ML NNI round 2 of 13, 1 of 91 splits
+ML-NNI round 2: LogLk = -27464.557 NNIs 32 max delta 1.42 Time 10.29
+     10.29 seconds: ML NNI round 3 of 13, 1 of 91 splits
+ML-NNI round 3: LogLk = -27463.783 NNIs 29 max delta 0.02 Time 13.06
+Turning off heuristics for final round of ML NNIs (converged)
+     13.06 seconds: ML NNI round 4 of 13, 1 of 91 splits
+ML-NNI round 4: LogLk = -27462.161 NNIs 27 max delta 0.00 Time 16.61 (final)
+     16.60 seconds: ML Lengths 1 of 91 splits
+Optimize all lengths: LogLk = -27462.138 Time 17.37
+Total time: 20.53 seconds Unique: 93/567 Bad splits: 0/90

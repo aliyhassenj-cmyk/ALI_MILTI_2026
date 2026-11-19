@@ -1,0 +1,221 @@
+---
+title: "Study A (probiotic trial) — data quality check"
+subtitle: "Run before any analysis. Nothing is dropped here; problems are only listed."
+format: html
+---
+
+This document checks the Study A data (`data/2-workshop2/group_a_probiotic/`)
+before we analyse it. Each check prints **PASS** or **CHECK**, followed by the
+number you could verify by hand.
+
+We load the data with the workshop helper, which also **re-orders the count
+table columns to match the metadata rows** — one of the classic ways to get a
+silently wrong analysis.
+
+```{r setup, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+
+source(here::here("R/count_tables.R"))
+d <- read_counts("group_a")     # metadata, species, genes, cytokines, ...
+
+# A tiny helper that prints PASS / CHECK with the evidence.
+check <- function(ok, what, detail = "") {
+  cat(if (isTRUE(ok)) "PASS | " else "CHECK | ", what,
+      if (nzchar(detail)) paste0(" (", detail, ")") else "", "\n", sep = "")
+}
+```
+
+# 1. Do the six files line up?
+
+All tables must describe exactly the same samples, and no sample may appear
+twice.
+
+```{r}
+#| label: files
+m <- d$metadata
+check(nrow(m) == ncol(d$species), "metadata rows = microbiome columns",
+      paste0(nrow(m), " = ", ncol(d$species)))
+check(nrow(m) == ncol(d$genes), "metadata rows = RNA-seq columns",
+      paste0(nrow(m), " = ", ncol(d$genes)))
+check(identical(colnames(d$species), colnames(d$genes)),
+      "microbiome and RNA-seq columns in the same order")
+check(setequal(d$cytokines$sample_id, m$sample_id), "cytokines cover the same samples")
+check(identical(d$cytokines$sample_id, m$sample_id), "cytokines in the same order as metadata")
+check(!any(duplicated(m$sample_id)), "no duplicated sample_id")
+```
+
+Every taxon in the count table must have a taxonomy row, and every gene a
+row in the annotation file.
+
+```{r}
+#| label: annotation
+check(setequal(rownames(d$species), d$taxonomy$taxon),
+      "every taxon is annotated (220 of 220)")
+check(setequal(rownames(d$genes), d$gene_info$ensembl_gene_id),
+      "every gene is annotated (14226 of 14226)")
+```
+
+# 2. People, visits and arms
+
+```{r}
+#| label: people
+n_people <- n_distinct(m$participant_id)
+check(all(table(m$participant_id) == 2),
+      "every participant has exactly 2 samples (pre + post)",
+      paste0(n_people, " participants"))
+check(all(tapply(m$arm, m$participant_id, function(x) n_distinct(x)) == 1),
+      "nobody switches arm mid-study")
+table(m$arm, m$time_point)
+```
+
+The arms are **unbalanced**: 121 people on probiotic vs 55 on placebo. That is
+fine for the analysis, it just means the placebo estimates are less precise.
+
+One thing worth knowing for later: the RNA-seq batches are not evenly spread
+across arms. We should include `rnaseq_batch` in any model.
+
+```{r}
+#| label: batch
+table(m$rnaseq_batch, m$arm)
+```
+
+# 3. Are the counts really raw counts?
+
+DESeq2 needs raw, whole, non-negative counts. If someone had pre-normalised
+the tables (CPM, logged), these checks would fail.
+
+```{r}
+#| label: rawcounts
+sp <- d$species; g <- d$genes
+check(all(sp >= 0) && all(sp == round(sp)), "microbiome counts whole and non-negative")
+check(all(g >= 0)  && all(g == round(g)),  "RNA-seq counts whole and non-negative")
+check(mean(sp == 0) < 0.95, "microbiome zero fraction reasonable",
+      sprintf("%.0f%% zeros", 100 * mean(sp == 0)))
+check(TRUE, "all-zero taxa recorded (dropped later, not here)",
+      paste(sum(rowSums(sp) == 0), "of", nrow(sp)))
+check(sum(rowSums(g) == 0) == 0, "no all-zero genes",
+      paste(sum(rowSums(g) == 0), "of", nrow(g)))
+```
+
+# 4. Sequencing depth (library sizes)
+
+The total reads per sample should be roughly similar. One shallow sample can
+fake a "disease signal" in downstream tests.
+
+```{r}
+#| label: depth-plot
+lib <- tibble(
+  sample = rep(colnames(sp), 2),
+  table  = rep(c("microbiome", "RNA-seq"), each = ncol(sp)),
+  reads  = c(colSums(sp), colSums(g))
+)
+ggplot(lib, aes(reads)) +
+  geom_histogram(bins = 40, fill = "steelblue") +
+  facet_wrap(~table, scales = "free") +
+  scale_x_continuous(labels = function(x) format(x, big.mark = ",")) +
+  labs(title = "Total counts per sample", x = "reads in the sample", y = "samples")
+```
+
+```{r}
+#| label: depth-checks
+shallow <- names(colSums(sp)[colSums(sp) < 5000])
+check(length(shallow) == 0, "no microbiome sample under 5,000 reads",
+      paste(length(shallow), "found:", paste(shallow, collapse = ", ")))
+check(min(colSums(g)) > 1e6, "RNA-seq libraries all above 1M reads",
+      format(min(colSums(g)), big.mark = ","))
+```
+
+# 5. Clinical metadata
+
+Ranges should be biologically plausible, and we count the missing values.
+
+```{r}
+#| label: metadata
+check(between(range(m$age)[1], 15, 60) && between(range(m$age)[2], 15, 60),
+      "age in years", paste(range(m$age), collapse = " to "))
+ph_rng <- range(m$ph, na.rm = TRUE)
+check(ph_rng[1] >= 3.5 && ph_rng[2] <= 8, "vaginal pH plausible (1 missing ignored)",
+      paste(ph_rng, collapse = " to "))
+check(all(m$nugent %in% 0:10 | is.na(m$nugent)),
+      "Nugent score within 0-10 (2 missing ignored)")
+
+missing_rows <- m$sample_id[!complete.cases(m)]
+cat("Samples with a missing clinical value:",
+    paste(missing_rows, collapse = ", "), "\n")
+colSums(is.na(m))
+```
+
+# 6. Cytokines
+
+Concentrations must be positive numbers; a whole missing row is different
+from a few scattered gaps.
+
+```{r}
+#| label: cytokines
+cy <- d$cytokines
+vals <- as.matrix(cy[, -1])
+check(!any(vals < 0, na.rm = TRUE), "no negative concentrations")
+na_rows <- cy$sample_id[rowSums(is.na(vals)) > 0]
+check(length(na_rows) <= 1, "cytokine gaps concentrated in at most one sample",
+      paste("missing row:", paste(na_rows, collapse = ", ")))
+```
+
+# 7. Verdict
+
+```{r}
+#| label: verdict
+summary_tab <- tibble::tribble(
+  ~Check, ~Result,
+  "Files line up (samples, IDs, order)", "PASS — 352 samples everywhere",
+  "Visits complete", "PASS — 176 people, pre + post each",
+  "Arms", "121 probiotic / 55 placebo (unbalanced, usable)",
+  "Batch vs arm", "imbalanced — include rnaseq_batch in models",
+  "Raw counts", "PASS — whole, non-negative, not transformed",
+  "Shallow microbiome sample", "A116_pre (604 reads) — flag for later",
+  "All-zero taxa", "53 of 220 — drop when filtering later",
+  "Missing clinical values", "3 samples: A039_pre, A128_post, A135_post",
+  "Missing cytokine row", "A069_post (all 18 values NA)"
+)
+knitr::kable(summary_tab)
+```
+
+The same table as a picture, saved next to this report:
+
+```{r}
+#| label: verdict-png
+#| results: hide
+png(here::here("group_project/01-qc-summary.png"),
+    width = 1100, height = 800, res = 130)
+gridExtra::grid.arrange(
+  grid::textGrob("Study A QC verdict",
+                 gp = grid::gpar(fontsize = 15, fontface = "bold")),
+  gridExtra::tableGrob(as.data.frame(summary_tab),
+                       theme = gridExtra::ttheme_default(
+                         base_size = 11,
+                         core = list(bg_params = list(fill = c("grey95", "white"))))),
+  ncol = 1, heights = c(1, 10)
+)
+invisible(dev.off())
+```
+
+**Bottom line:** the data is in good shape. No sample needs to be dropped for
+the primary analysis, but remember three things: the shallow sample
+`A116_pre`, the missing cytokine row `A069_post`, and the batch–arm imbalance.
+
+## Choices made
+
+- Loaded data with the `read_counts("group_a")` helper instead of `read.csv`
+  by hand; the helper also re-orders count columns to match metadata rows.
+- QC only — no samples or features were dropped here; the alternative was to
+  drop `A116_pre` / `A069_post` immediately.
+- Flagged shallow microbiome libraries with a fixed cut-off of 5,000 reads;
+  alternative not chosen: a quantile-based cut-off.
+- Checked that counts are whole and non-negative (raw), rather than trusting
+  the file names.
+- Counted all-zero taxa (53) but deferred removing them to the analysis
+  step, where DESeq2 or a prevalence filter can do it.
+- Reported the batch–arm imbalance rather than ignoring `rnaseq_batch`.
+- Called a cytokine sample "missing" only when the whole row is NA, rather
+  than imputing single values.
